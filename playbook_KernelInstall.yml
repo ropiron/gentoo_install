@@ -1,0 +1,402 @@
+---
+- name: Install Gentoo binary kernel and GRUB
+  hosts: gentoo
+  become: true
+  gather_facts: false
+
+  collections:
+    - ansible.posix
+
+  vars:
+    gentoo_root: /mnt/gentoo
+
+    root_device: /dev/nvme0n1p3
+    efi_device: /dev/nvme0n1p1
+
+    gentoo_efi_mount: "{{ gentoo_root }}/efi"
+
+    kernel_package: sys-kernel/gentoo-kernel-bin
+
+  tasks:
+    - name: Verify root device exists
+      ansible.builtin.stat:
+        path: "{{ root_device }}"
+      register: root_device_stat
+
+    - name: Refuse to continue if root device does not exist
+      ansible.builtin.assert:
+        that:
+          - root_device_stat.stat.exists
+          - root_device_stat.stat.isblk
+        fail_msg: >-
+          ルートデバイス {{ root_device }} がブロックデバイスとして存在しません。
+
+    - name: Verify EFI device exists
+      ansible.builtin.stat:
+        path: "{{ efi_device }}"
+      register: efi_device_stat
+
+    - name: Refuse to continue if EFI device does not exist
+      ansible.builtin.assert:
+        that:
+          - efi_device_stat.stat.exists
+          - efi_device_stat.stat.isblk
+        fail_msg: >-
+          EFIデバイス {{ efi_device }} がブロックデバイスとして存在しません。
+
+    - name: Check whether installer was booted in UEFI mode
+      ansible.builtin.stat:
+        path: /sys/firmware/efi
+      register: host_uefi
+
+    - name: Refuse normal GRUB UEFI registration outside UEFI mode
+      ansible.builtin.assert:
+        that:
+          - host_uefi.stat.exists
+          - host_uefi.stat.isdir
+        fail_msg: >-
+          インストール環境がUEFIモードで起動されていません。
+          GRUBを通常のUEFI NVRAMとフォールバックパスの両方へ
+          インストールするため、インストールメディアをUEFIモードで
+          起動してから再実行してください。
+
+    - name: Create Gentoo root mount point
+      ansible.builtin.file:
+        path: "{{ gentoo_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount Gentoo root filesystem
+      ansible.posix.mount:
+        path: "{{ gentoo_root }}"
+        src: "{{ root_device }}"
+        fstype: xfs
+        opts: defaults
+        state: ephemeral
+
+    - name: Verify Gentoo system archive was extracted
+      ansible.builtin.stat:
+        path: "{{ gentoo_root }}/bin/bash"
+      register: gentoo_bash
+
+    - name: Refuse to continue if Gentoo system is not installed
+      ansible.builtin.assert:
+        that:
+          - gentoo_bash.stat.exists
+          - gentoo_bash.stat.isreg
+        fail_msg: >-
+          {{ gentoo_root }}/bin/bash が存在しません。
+          stage3を展開してから、このPlaybookを実行してください。
+
+    - name: Create required mount points
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ gentoo_efi_mount }}"
+        - "{{ gentoo_root }}/boot"
+        - "{{ gentoo_root }}/proc"
+        - "{{ gentoo_root }}/sys"
+        - "{{ gentoo_root }}/dev"
+        - "{{ gentoo_root }}/run"
+
+    - name: Mount EFI System Partition
+      ansible.posix.mount:
+        path: "{{ gentoo_efi_mount }}"
+        src: "{{ efi_device }}"
+        fstype: vfat
+        opts: umask=0077
+        state: ephemeral
+
+    - name: Check whether efivarfs is mounted
+      ansible.builtin.command:
+        cmd: mountpoint -q /sys/firmware/efi/efivars
+      register: efivarfs_mountpoint
+      failed_when: false
+      changed_when: false
+
+    - name: Mount efivarfs
+      ansible.builtin.command:
+        cmd: mount -t efivarfs efivarfs /sys/firmware/efi/efivars
+      when: efivarfs_mountpoint.rc != 0
+      changed_when: true
+
+    - name: Check whether proc is mounted in chroot
+      ansible.builtin.command:
+        cmd: mountpoint -q "{{ gentoo_root }}/proc"
+      register: proc_mountpoint
+      failed_when: false
+      changed_when: false
+
+    - name: Mount proc in chroot
+      ansible.builtin.command:
+        cmd: mount -t proc proc "{{ gentoo_root }}/proc"
+      when: proc_mountpoint.rc != 0
+      changed_when: true
+
+    - name: Check whether sys is mounted in chroot
+      ansible.builtin.command:
+        cmd: mountpoint -q "{{ gentoo_root }}/sys"
+      register: sys_mountpoint
+      failed_when: false
+      changed_when: false
+
+    - name: Recursively bind mount sys in chroot
+      ansible.builtin.command:
+        cmd: mount --rbind /sys "{{ gentoo_root }}/sys"
+      when: sys_mountpoint.rc != 0
+      changed_when: true
+
+    - name: Make chroot sys mount propagation slave
+      ansible.builtin.command:
+        cmd: mount --make-rslave "{{ gentoo_root }}/sys"
+      changed_when: false
+
+    - name: Check whether dev is mounted in chroot
+      ansible.builtin.command:
+        cmd: mountpoint -q "{{ gentoo_root }}/dev"
+      register: dev_mountpoint
+      failed_when: false
+      changed_when: false
+
+    - name: Recursively bind mount dev in chroot
+      ansible.builtin.command:
+        cmd: mount --rbind /dev "{{ gentoo_root }}/dev"
+      when: dev_mountpoint.rc != 0
+      changed_when: true
+
+    - name: Make chroot dev mount propagation slave
+      ansible.builtin.command:
+        cmd: mount --make-rslave "{{ gentoo_root }}/dev"
+      changed_when: false
+
+    - name: Check whether run is mounted in chroot
+      ansible.builtin.command:
+        cmd: mountpoint -q "{{ gentoo_root }}/run"
+      register: run_mountpoint
+      failed_when: false
+      changed_when: false
+
+    - name: Recursively bind mount run in chroot
+      ansible.builtin.command:
+        cmd: mount --rbind /run "{{ gentoo_root }}/run"
+      when: run_mountpoint.rc != 0
+      changed_when: true
+
+    - name: Make chroot run mount propagation slave
+      ansible.builtin.command:
+        cmd: mount --make-rslave "{{ gentoo_root }}/run"
+      changed_when: false
+
+    - name: Copy DNS configuration into Gentoo
+      ansible.builtin.command:
+        cmd: >-
+          cp --dereference /etc/resolv.conf
+          {{ gentoo_root }}/etc/resolv.conf
+      changed_when: true
+
+    - name: Create Portage configuration directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ gentoo_root }}/etc/portage/package.use"
+        - "{{ gentoo_root }}/etc/portage/package.license"
+
+    - name: Enable installkernel support for GRUB and dracut
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/portage/package.use/installkernel"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          sys-kernel/installkernel grub dracut
+
+    - name: Accept firmware and Intel microcode licenses
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/portage/package.license/kernel-firmware"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          sys-kernel/linux-firmware linux-fw-redistributable no-source-code
+          sys-firmware/intel-microcode intel-ucode
+
+    - name: Configure GRUB for 64-bit UEFI
+      ansible.builtin.blockinfile:
+        path: "{{ gentoo_root }}/etc/portage/make.conf"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+        marker: "# {mark} ANSIBLE GRUB PLATFORM"
+        block: |
+          GRUB_PLATFORMS="efi-64"
+
+    - name: Install firmware microcode installkernel dracut and GRUB
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - /bin/bash
+          - -lc
+          - >-
+            emerge --verbose
+            sys-kernel/linux-firmware
+            sys-firmware/intel-microcode
+            sys-kernel/installkernel
+            sys-boot/grub
+            sys-fs/xfsprogs
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Install Gentoo binary kernel
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - /bin/bash
+          - -lc
+          - "emerge --verbose {{ kernel_package }}"
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Find installed kernel release
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - /bin/bash
+          - -lc
+          - >-
+            find /lib/modules -mindepth 1 -maxdepth 1 -type d
+            -printf '%f\n' | sort -V | tail -n 1
+      register: installed_kernel_release
+      changed_when: false
+
+    - name: Verify an installed kernel release was found
+      ansible.builtin.assert:
+        that:
+          - installed_kernel_release.stdout | trim | length > 0
+        fail_msg: >-
+          {{ kernel_package }} のインストール後に
+          /lib/modules以下からカーネルリリースを検出できませんでした。
+
+    - name: Rebuild initramfs for installed kernel
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - /bin/bash
+          - -lc
+          - >-
+            dracut --force
+            /boot/initramfs-{{ installed_kernel_release.stdout | trim }}.img
+            {{ installed_kernel_release.stdout | trim }}
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Install GRUB and register Gentoo in UEFI NVRAM
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - grub-install
+          - --target=x86_64-efi
+          - --efi-directory=/efi
+          - --bootloader-id=Gentoo
+          - --recheck
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Install GRUB to the removable UEFI fallback path
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - grub-install
+          - --target=x86_64-efi
+          - --efi-directory=/efi
+          - --bootloader-id=Gentoo
+          - --removable
+          - --no-nvram
+          - --recheck
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Generate GRUB configuration
+      ansible.builtin.command:
+        argv:
+          - chroot
+          - "{{ gentoo_root }}"
+          - grub-mkconfig
+          - -o
+          - /boot/grub/grub.cfg
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Verify installed kernel image
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          find "{{ gentoo_root }}/boot" -maxdepth 1 -type f \
+            \( -name 'vmlinuz-*' -o -name 'kernel-*' \) -print -quit |
+            grep -q .
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify generated initramfs
+      ansible.builtin.stat:
+        path: >-
+          {{ gentoo_root }}/boot/initramfs-{{ installed_kernel_release.stdout | trim }}.img
+      register: initramfs_file
+
+    - name: Verify GRUB configuration
+      ansible.builtin.stat:
+        path: "{{ gentoo_root }}/boot/grub/grub.cfg"
+      register: grub_configuration
+
+    - name: Verify normal GRUB UEFI executable
+      ansible.builtin.stat:
+        path: "{{ gentoo_efi_mount }}/EFI/Gentoo/grubx64.efi"
+      register: normal_grub_efi
+
+    - name: Verify fallback GRUB UEFI executable
+      ansible.builtin.stat:
+        path: "{{ gentoo_efi_mount }}/EFI/BOOT/BOOTX64.EFI"
+      register: fallback_grub_efi
+
+    - name: Assert kernel boot files were installed
+      ansible.builtin.assert:
+        that:
+          - initramfs_file.stat.exists
+          - initramfs_file.stat.isreg
+          - grub_configuration.stat.exists
+          - grub_configuration.stat.isreg
+          - normal_grub_efi.stat.exists
+          - normal_grub_efi.stat.isreg
+          - fallback_grub_efi.stat.exists
+          - fallback_grub_efi.stat.isreg
+        fail_msg: >-
+          カーネル、initramfs、GRUB設定、またはGRUBのUEFI実行ファイルが
+          正しくインストールされていません。
+
+    - name: Show kernel and bootloader installation result
+      ansible.builtin.debug:
+        msg:
+          - "Gentooバイナリカーネルをインストールしました。"
+          - "カーネルリリース: {{ installed_kernel_release.stdout | trim }}"
+          - "initramfs: /boot/initramfs-{{ installed_kernel_release.stdout | trim }}.img"
+          - "GRUB設定: /boot/grub/grub.cfg"
+          - "通常UEFIエントリ: /efi/EFI/Gentoo/grubx64.efi"
+          - "フォールバック: /efi/EFI/BOOT/BOOTX64.EFI"
+          - "Secure Boot: 無効"
+          - "SOF Firmware: 未インストール"
