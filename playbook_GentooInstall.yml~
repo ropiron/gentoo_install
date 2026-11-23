@@ -1,0 +1,58 @@
+---
+- name: Bootstrap Gentoo stage3
+  hosts: localhost
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - group_vars/all.yml
+
+  tasks:
+    - name: Create required directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ gentoo_root }}"
+        - "{{ gentoo_root }}/var/tmp"
+
+    - name: Download Gentoo desktop stage3
+      ansible.builtin.get_url:
+        url: "{{ gentoo_stage_url }}"
+        dest: "{{ gentoo_stage_archive }}"
+        checksum: "sha512:{{ gentoo_stage_sha512 }}"
+        mode: "0644"
+        timeout: 300
+
+    - name: Check whether stage3 was extracted
+      ansible.builtin.stat:
+        path: "{{ gentoo_stage_marker }}"
+      register: stage_marker
+
+    - name: Extract Gentoo stage3
+      ansible.builtin.command:
+        argv:
+          - tar
+          - xpvf
+          - "{{ gentoo_stage_archive }}"
+          - "--xattrs-include=*.*"
+          - "--numeric-owner"
+          - "-C"
+          - "{{ gentoo_root }}"
+      when: not stage_marker.stat.exists
+
+    - name: Mark stage3 as extracted
+      ansible.builtin.file:
+        path: "{{ gentoo_stage_marker }}"
+        state: touch
+        mode: "0644"
+      when: not stage_marker.stat.exists
+
+    - name: Configure Portage
+      ansible.builtin.template:
+        src: templates/make.conf.j2
+        dest: "{{ gentoo_root }}/etc/portage/make.conf"
+        owner: root
+        group: root
+        mode: "0644"

@@ -1,0 +1,94 @@
+---
+- name: Partition Gentoo installation disk
+  hosts: gentoo
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Refuse to continue unless explicitly confirmed
+      ansible.builtin.assert:
+        that:
+          - confirm_destroy | bool
+        fail_msg: >-
+          破壊的操作です。
+          vars.yml の confirm_destroy を true に変更してから実行してください。
+
+    - name: Verify target disk exists
+      ansible.builtin.stat:
+        path: "{{ target_disk }}"
+      register: disk_stat
+
+    - name: Abort if target disk does not exist
+      ansible.builtin.assert:
+        that:
+          - disk_stat.stat.exists
+          - disk_stat.stat.isblk
+        fail_msg: "{{ target_disk }} がブロックデバイスとして存在しません。"
+
+    - name: Show target disk
+      ansible.builtin.command:
+        cmd: "lsblk -o NAME,SIZE,MODEL,TYPE,FSTYPE,MOUNTPOINTS {{ target_disk }}"
+      register: disk_info
+      changed_when: false
+
+    - name: Display target disk
+      ansible.builtin.debug:
+        var: disk_info.stdout_lines
+
+    - name: Destroy existing partition table
+      ansible.builtin.command:
+        cmd: "sgdisk --zap-all {{ target_disk }}"
+      register: zap_result
+
+    - name: Create new GPT partition table
+      ansible.builtin.command:
+        cmd: "parted -s {{ target_disk }} mklabel gpt"
+
+    - name: Create EFI System Partition
+      community.general.parted:
+        device: "{{ target_disk }}"
+        label: gpt
+        number: 1
+        state: present
+        part_start: 1MiB
+        part_end: 1025MiB
+        fs_type: fat32
+        flags:
+          - esp
+
+    - name: Create swap partition
+      community.general.parted:
+        device: "{{ target_disk }}"
+        label: gpt
+        number: 2
+        state: present
+        part_start: 1025MiB
+        part_end: 5121MiB
+        fs_type: linux-swap
+
+    - name: Create root partition
+      community.general.parted:
+        device: "{{ target_disk }}"
+        label: gpt
+        number: 3
+        state: present
+        part_start: 5121MiB
+        part_end: 100%
+        fs_type: xfs
+
+    - name: Inform kernel of partition changes
+      ansible.builtin.command:
+        cmd: "partprobe {{ target_disk }}"
+      changed_when: false
+
+    - name: Display resulting partition table
+      ansible.builtin.command:
+        cmd: "lsblk -o NAME,SIZE,TYPE,FSTYPE,PARTTYPE,MOUNTPOINTS {{ target_disk }}"
+      register: result
+
+    - name: Show resulting partition table
+      ansible.builtin.debug:
+        var: result.stdout_lines

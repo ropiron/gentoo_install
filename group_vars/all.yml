@@ -1,0 +1,15 @@
+gentoo_root: /mnt/gentoo
+
+gentoo_stage_url: >-
+  https://distfiles.gentoo.org/releases/amd64/autobuilds/20261101T164556Z/stage3-amd64-desktop-openrc-20261101T164556Z.tar.xz
+
+# 実際のDIGESTSに記載されたSHA512値へ置き換える
+gentoo_stage_sha512: "REPLACE_WITH_SHA512"
+
+gentoo_stage_archive: "{{ gentoo_root }}/var/tmp/stage3.tar.xz"
+gentoo_stage_marker: "{{ gentoo_root }}/.stage3-installed"
+
+gentoo_common_flags: "-march=native -O2 -pipe"
+gentoo_makeopts: "-j2 -l3"
+gentoo_cflags: "{{ gentoo_common_flags }}"
+gentoo_cxxflags: "{{ gentoo_common_flags }}"

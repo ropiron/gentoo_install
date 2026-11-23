@@ -1,0 +1,120 @@
+---
+- name: Format and mount Gentoo partitions
+  hosts: installer
+  become: true
+  gather_facts: false
+
+  collections:
+    - community.general
+    - ansible.posix
+
+  vars:
+    efi_device: /dev/nvme0n1p1
+    swap_device: /dev/nvme0n1p2
+    root_device: /dev/nvme0n1p3
+
+    gentoo_root: /mnt/gentoo
+    gentoo_efi: /mnt/gentoo/efi
+
+  tasks:
+    - name: Unmount target filesystem
+      ansible.builtin.command:
+        cmd: umount -R /mnt/gentoo
+      register: umount_result
+      changed_when: umount_result.rc == 0
+      failed_when:
+        - umount_result.rc != 0
+        - "'not mounted' not in umount_result.stderr"
+
+    - name: Disable target swap
+      ansible.builtin.command:
+        cmd: swapoff "{{ swap_device }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Display target devices
+      ansible.builtin.debug:
+        msg:
+          - "EFI : {{ efi_device }}"
+          - "Swap: {{ swap_device }}"
+          - "Root: {{ root_device }}"
+
+    - name: Create VFAT filesystem on EFI system partition
+      community.general.filesystem:
+        dev: "{{ efi_device }}"
+        fstype: vfat
+        opts: "-F 32"
+        force: false
+
+    - name: Create swap filesystem
+      community.general.filesystem:
+        dev: "{{ swap_device }}"
+        fstype: swap
+        force: false
+
+    - name: Create XFS filesystem on root partition
+      community.general.filesystem:
+        dev: "{{ root_device }}"
+        fstype: xfs
+        force: true
+
+    - name: Create Gentoo root mount point
+      ansible.builtin.file:
+        path: "{{ gentoo_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Create EFI mount point
+      ansible.builtin.file:
+        path: "{{ gentoo_efi }}"
+        state: directory
+        mode: "0755"	
+
+    - name: Check active swap devices
+      ansible.builtin.command:
+        cmd: swapon --show=NAME --noheadings
+      register: swap_devices
+      changed_when: false
+
+    - name: Activate swap if it is not already active
+      ansible.builtin.command:
+        cmd: swapon "{{ swap_device }}"
+      register: swapon_result
+      changed_when: true
+      when: swap_device not in swap_devices.stdout
+
+    - name: Mount Gentoo root filesystem
+      ansible.posix.mount:
+        path: "{{ gentoo_root }}"
+        src: "{{ root_device }}"
+        fstype: xfs
+        opts: defaults
+        state: ephemeral
+
+    - name: Mount EFI system partition
+      ansible.posix.mount:
+        path: "{{ gentoo_efi }}"
+        src: "{{ efi_device }}"
+        fstype: vfat
+        opts: umask=0077
+        state: ephemeral
+
+    - name: Show mounted root filesystem
+      ansible.builtin.command:
+        cmd: findmnt --target "{{ gentoo_root }}"
+      register: root_mount
+      changed_when: false
+
+    - name: Show mounted EFI filesystem
+      ansible.builtin.command:
+        cmd: findmnt --target "{{ gentoo_efi }}"
+      register: efi_mount
+      changed_when: false
+
+    - name: Display mounted root filesystem
+      ansible.builtin.debug:
+        var: root_mount.stdout_lines
+
+    - name: Display mounted EFI filesystem
+      ansible.builtin.debug:
+        var: efi_mount.stdout_lines

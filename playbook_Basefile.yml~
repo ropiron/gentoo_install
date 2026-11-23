@@ -1,0 +1,266 @@
+---
+- name: Install Gentoo base system
+  hosts: all
+  connection: local
+  become: true
+  gather_facts: false
+
+  vars:
+    gentoo_root: /mnt/gentoo
+
+    efi_device: /dev/nvme0n1p1
+    swap_device: /dev/nvme0n1p2
+    root_device: /dev/nvme0n1p3
+
+    gentoo_timezone: Asia/Tokyo
+    gentoo_locale: ja_JP.UTF-8
+    gentoo_profile: default/linux/amd64/23.0/no-multilib
+
+    gentoo_rsync_mirror: rsync://rsync.jp.gentoo.org/gentoo-portage/
+
+  tasks:
+    - name: Check Gentoo root directory
+      ansible.builtin.stat:
+        path: "{{ gentoo_root }}"
+      register: gentoo_root_stat
+
+    - name: Fail if Gentoo root directory does not exist
+      ansible.builtin.fail:
+        msg: >
+          {{ gentoo_root }} が存在しません。
+          stage3 を展開し、root パーティションをマウントしてください。
+      when: not gentoo_root_stat.stat.exists
+
+    - name: Mount Gentoo root filesystem
+      ansible.posix.mount:
+        path: "{{ gentoo_root }}"
+        src: "{{ root_device }}"
+        fstype: xfs
+        state: mounted
+
+    - name: Create EFI mount point
+      ansible.builtin.file:
+        path: "{{ gentoo_root }}/efi"
+        state: directory
+        mode: "0755"
+
+    - name: Mount EFI System Partition
+      ansible.posix.mount:
+        path: "{{ gentoo_root }}/efi"
+        src: "{{ efi_device }}"
+        fstype: vfat
+        opts: umask=0077
+        state: mounted
+
+    - name: Copy DNS configuration into Gentoo
+      ansible.builtin.command:
+        cmd: cp --dereference /etc/resolv.conf "{{ gentoo_root }}/etc/resolv.conf"
+      changed_when: true
+
+    - name: Mount proc
+      ansible.builtin.command:
+        cmd: >
+          mountpoint -q "{{ gentoo_root }}/proc" ||
+          mount -t proc /proc "{{ gentoo_root }}/proc"
+      changed_when: true
+
+    - name: Bind mount sys
+      ansible.builtin.command:
+        cmd: >
+          mountpoint -q "{{ gentoo_root }}/sys" ||
+          mount --rbind /sys "{{ gentoo_root }}/sys"
+      changed_when: true
+
+    - name: Make sys mount slave
+      ansible.builtin.command:
+        cmd: mount --make-rslave "{{ gentoo_root }}/sys"
+      changed_when: true
+
+    - name: Bind mount dev
+      ansible.builtin.command:
+        cmd: >
+          mountpoint -q "{{ gentoo_root }}/dev" ||
+          mount --rbind /dev "{{ gentoo_root }}/dev"
+      changed_when: true
+
+    - name: Make dev mount slave
+      ansible.builtin.command:
+        cmd: mount --make-rslave "{{ gentoo_root }}/dev"
+      changed_when: true
+
+    - name: Bind mount run
+      ansible.builtin.command:
+        cmd: >
+          mountpoint -q "{{ gentoo_root }}/run" ||
+          mount --rbind /run "{{ gentoo_root }}/run"
+      changed_when: true
+
+    - name: Make run mount slave
+      ansible.builtin.command:
+        cmd: mount --make-rslave "{{ gentoo_root }}/run"
+      changed_when: true
+
+    - name: Create Portage configuration directories
+      ansible.builtin.file:
+        path: "{{ gentoo_root }}/etc/portage/repos.conf"
+        state: directory
+        mode: "0755"
+
+    - name: Configure Gentoo repository
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/portage/repos.conf/gentoo.conf"
+        mode: "0644"
+        content: |
+          [DEFAULT]
+          main-repo = gentoo
+
+          [gentoo]
+          location = /var/db/repos/gentoo
+          sync-type = rsync
+          sync-uri = {{ gentoo_rsync_mirror }}
+          auto-sync = yes
+          sync-rsync-verify-jobs = 1
+          sync-rsync-verify-metamanifest = yes
+          sync-rsync-verify-max-age = 3
+          sync-openpgp-key-path = /usr/share/openpgp-keys/gentoo-release.asc
+          sync-openpgp-keyserver = hkps://keys.gentoo.org
+          sync-openpgp-key-refresh-retry-count = 40
+          sync-openpgp-key-refresh-retry-overall-timeout = 1200
+          sync-openpgp-key-refresh-retry-delay-exp-base = 2
+          sync-openpgp-key-refresh-retry-delay-max = 60
+          sync-openpgp-key-refresh-retry-delay-mult = 4
+          sync-webrsync-verify-signature = yes
+          sync-git-verify-commit-signature = true
+
+    - name: Configure fstab
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/fstab"
+        mode: "0644"
+        content: |
+          # Gentoo filesystem table
+
+          {{ root_device }}  /      xfs  defaults,noatime  0 1
+          {{ efi_device }}   /efi   vfat  umask=0077        0 2
+          {{ swap_device }}  none   swap  sw                0 0
+
+    - name: Install Gentoo repository snapshot
+      ansible.builtin.command:
+        cmd: chroot "{{ gentoo_root }}" /bin/bash -lc "emerge-webrsync"
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Update Gentoo repository from Japanese rsync mirror
+      ansible.builtin.command:
+        cmd: chroot "{{ gentoo_root }}" /bin/bash -lc "emerge --sync --quiet"
+      environment:
+        HOME: /root
+      changed_when: true
+
+    - name: Show Gentoo news
+      ansible.builtin.command:
+        cmd: chroot "{{ gentoo_root }}" /bin/bash -lc "eselect news list"
+      register: gentoo_news
+      changed_when: false
+
+    - name: Display Gentoo news
+      ansible.builtin.debug:
+        var: gentoo_news.stdout_lines
+
+    - name: Select Gentoo profile
+      ansible.builtin.command:
+        cmd: >
+          chroot "{{ gentoo_root }}" /bin/bash -lc
+          "eselect profile set {{ gentoo_profile }}"
+      changed_when: true
+
+    - name: Set timezone
+      ansible.builtin.file:
+        src: "../usr/share/zoneinfo/{{ gentoo_timezone }}"
+        dest: "{{ gentoo_root }}/etc/localtime"
+        state: link
+        force: true
+
+    - name: Configure locale.gen
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/locale.gen"
+        mode: "0644"
+        content: |
+          ja_JP.UTF-8 UTF-8
+          en_US.UTF-8 UTF-8
+
+    - name: Generate locales
+      ansible.builtin.command:
+        cmd: chroot "{{ gentoo_root }}" /bin/bash -lc "locale-gen"
+      changed_when: true
+
+    - name: Configure system locale
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/env.d/02locale"
+        mode: "0644"
+        content: |
+          LANG="{{ gentoo_locale }}"
+          LC_COLLATE="C.UTF-8"
+
+    - name: Update environment
+      ansible.builtin.command:
+        cmd: chroot "{{ gentoo_root }}" /bin/bash -lc "env-update"
+      changed_when: true
+
+    - name: Install cpuid2cpuflags
+      ansible.builtin.command:
+        cmd: >
+          chroot "{{ gentoo_root }}" /bin/bash -lc
+          "emerge --oneshot app-portage/cpuid2cpuflags"
+      changed_when: true
+
+    - name: Detect CPU flags
+      ansible.builtin.command:
+        cmd: chroot "{{ gentoo_root }}" /bin/bash -lc "cpuid2cpuflags"
+      register: cpu_flags
+      changed_when: false
+
+    - name: Configure CPU flags
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/portage/package.use/00cpu-flags"
+        mode: "0644"
+        content: |
+          {{ cpu_flags.stdout }}
+
+    - name: Configure Portage defaults
+      ansible.builtin.blockinfile:
+        path: "{{ gentoo_root }}/etc/portage/make.conf"
+        create: true
+        marker: "# {mark} ANSIBLE GENTOO CONFIGURATION"
+        block: |
+          COMMON_FLAGS="-O2 -pipe"
+          CFLAGS="${COMMON_FLAGS}"
+          CXXFLAGS="${COMMON_FLAGS}"
+          FCFLAGS="${COMMON_FLAGS}"
+          FFLAGS="${COMMON_FLAGS}"
+
+          MAKEOPTS="-j$(nproc)"
+          ACCEPT_LICENSE="@FREE"
+
+    - name: Configure VIDEO_CARDS
+      ansible.builtin.copy:
+        dest: "{{ gentoo_root }}/etc/portage/package.use/00video_cards"
+        mode: "0644"
+        content: |
+          # 必要に応じて変更してください
+          # Intel:
+          # */* VIDEO_CARDS: -* intel
+          #
+          # AMD:
+          # */* VIDEO_CARDS: -* amdgpu radeonsi
+          #
+          # NVIDIA:
+          # */* VIDEO_CARDS: -* nvidia
+
+    - name: Check whether world update should be performed
+      ansible.builtin.debug:
+        msg:
+          - "基本環境の設定が完了しました。"
+          - "必要に応じて VIDEO_CARDS を設定後、以下を実行してください。"
+          - "emerge --update --deep --changed-use @world"
+          - "emerge --ask --depclean"

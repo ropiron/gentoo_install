@@ -1,0 +1,15 @@
+COMMON_FLAGS="{{ gentoo_common_flags }}"
+
+CFLAGS="${COMMON_FLAGS}"
+CXXFLAGS="${COMMON_FLAGS}"
+
+MAKEOPTS="{{ gentoo_makeopts }}"
+
+FEATURES="parallel-fetch parallel-install"
+EMERGE_DEFAULT_OPTS="--jobs=1 --load-average=3"
+
+ACCEPT_LICENSE="*"
+GRUB_PLATFORMS="efi-64"
+
+VIDEO_CARDS="intel"
+INPUT_DEVICES="libinput"
